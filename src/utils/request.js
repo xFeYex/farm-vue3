@@ -8,6 +8,11 @@ const request = axios.create({
 // request interceptor
 request.interceptors.request.use(
   config => {
+    // 某些模块需要自己精确控制 userId 注入逻辑，例如智慧生产接口只接受指定字段。
+    if (config.autoInjectUser === false) {
+      return config
+    }
+
     // 从 localStorage 获取当前配置的 user_id
     const userId = localStorage.getItem('farming_user_id')
     if (userId) {

@@ -67,7 +67,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createResource, updateResource, getResourceDetail } from '@/api/lease'
+import { createResource, getResourceDetail, updateResource } from '@/api/lease'
 import { ElMessage } from 'element-plus'
 
 const route = useRoute()
@@ -89,6 +89,7 @@ const form = reactive({
   pricePerMonth: undefined,
   minLeaseMonths: 1,
   description: '',
+  userId: Number(localStorage.getItem('farming_user_id')) || 1,
   ownerUserId: Number(localStorage.getItem('farming_user_id')) || 1
 })
 
@@ -118,21 +119,41 @@ const rules = reactive({
   ]
 })
 
+const getCurrentUserId = () => Number(localStorage.getItem('farming_user_id')) || 1
+
+const applyResourceData = (data = {}) => {
+  form.title = data.title ?? ''
+  form.resourceType = data.resourceType ?? ''
+  form.area = data.area ?? undefined
+  form.locationDesc = data.locationDesc ?? ''
+  form.pricePerMonth = data.pricePerMonth ?? undefined
+  form.minLeaseMonths = data.minLeaseMonths ?? 1
+  form.description = data.description ?? ''
+  form.ownerUserId = data.ownerUserId ?? form.ownerUserId
+  form.userId = getCurrentUserId()
+}
+
+const buildPayload = () => ({
+  userId: getCurrentUserId(),
+  title: form.title,
+  resourceType: form.resourceType,
+  area: form.area,
+  locationDesc: form.locationDesc,
+  pricePerMonth: form.pricePerMonth,
+  minLeaseMonths: form.minLeaseMonths,
+  description: form.description || null,
+})
+
 // 获取资源详情（编辑模式）
 const fetchDetail = async () => {
   if (!isEdit.value) return
   
   loading.value = true
   try {
-    const res = await getResourceDetail(resourceId.value)
-    const data = res.data || res
+    const data = await getResourceDetail(resourceId.value)
+    applyResourceData(data)
     
     // 回填表单数据
-    Object.keys(form).forEach(key => {
-      if (data[key] !== undefined) {
-        form[key] = data[key]
-      }
-    })
   } catch (error) {
     console.error('获取资源详情失败:', error)
     ElMessage.error('获取资源详情失败')
@@ -143,14 +164,17 @@ const fetchDetail = async () => {
 
 // 提交表单
 const handleSubmit = async () => {
+  return submitResourceForm()
   if (!formRef.value) return
   
   await formRef.value.validate(async (valid, fields) => {
     if (valid) {
       submitting.value = true
       try {
+        const payload = buildPayload()
         if (isEdit.value) {
-          await updateResource(resourceId.value, form)
+          ElMessage.warning('当前后端暂未提供资源编辑接口，当前页面仅支持查看已发布资源')
+          return
           ElMessage.success('更新成功')
         } else {
           await createResource(form)
@@ -170,8 +194,75 @@ const handleSubmit = async () => {
 }
 
 // 返回上一页
+const submitResourceForm = async () => {
+const submitResourceForm = async () => {
+  if (!formRef.value) {
+    return
+  }
+
+  const valid = await formRef.value.validate().catch(() => false)
+  if (!valid) {
+    return
+  }
+
+  submitting.value = true
+
+  try {
+    const payload = buildPayload()
+
+    if (isEdit.value) {
+      const data = await updateResource(resourceId.value, payload)
+      applyResourceData(data)
+      ElMessage.success('更新成功')
+      return
+    }
+
+    await createResource(payload)
+    ElMessage.success('发布成功')
+    router.push('/lease/my-publish')
+  } catch (error) {
+    console.error('保存失败:', error)
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
 const goBack = () => {
   router.back()
+}
+
+const realSubmitResourceForm = async () => {
+  if (!formRef.value) {
+    return
+  }
+
+  const valid = await formRef.value.validate().catch(() => false)
+  if (!valid) {
+    return
+  }
+
+  submitting.value = true
+
+  try {
+    const payload = buildPayload()
+
+    if (isEdit.value) {
+      const data = await updateResource(resourceId.value, payload)
+      applyResourceData(data)
+      ElMessage.success('更新成功')
+      return
+    }
+
+    await createResource(payload)
+    ElMessage.success('发布成功')
+    router.push('/lease/my-publish')
+  } catch (error) {
+    console.error('保存失败:', error)
+    ElMessage.error(error.message || '保存失败')
+  } finally {
+    submitting.value = false
+  }
 }
 
 onMounted(() => {

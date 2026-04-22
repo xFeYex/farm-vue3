@@ -6,6 +6,7 @@ const route = useRoute()
 const router = useRouter()
 
 const globalUserId = ref('')
+const sharingMenuLabel = '\u519c\u4ea7\u54c1\u5171\u4eab'
 
 onMounted(() => {
   const savedId = localStorage.getItem('farming_user_id')
@@ -13,8 +14,8 @@ onMounted(() => {
     globalUserId.value = savedId
   } else {
     // 默认给一个初始的 user_id
-    globalUserId.value = '1'
-    localStorage.setItem('farming_user_id', '1')
+    globalUserId.value = '2001'
+    localStorage.setItem('farming_user_id', '2001')
   }
 })
 
@@ -30,6 +31,10 @@ const activeMenu = computed(() => {
     return '/production'
   }
   // 否则高亮租赁模块对应的子页面
+  if (route.path.startsWith('/sharing')) {
+    return '/sharing'
+  }
+
   return route.path
 })
 
@@ -64,6 +69,8 @@ const handleSelect = (key) => {
       <!-- 生产模块 -->
       <el-menu-item index="/production">农场生产</el-menu-item>
       
+      <el-menu-item index="/sharing">{{ sharingMenuLabel }}</el-menu-item>
+
       <div class="flex-grow"></div>
       
       <!-- 模拟用户登录，填充 user_id -->

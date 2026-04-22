@@ -103,8 +103,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { getResourceDetail, cancelSubscription, getMySubscriptions } from '@/api/lease'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-import SubscribeDialog from './components/SubscribeDialog.vue'
-import RenewDialog from './components/RenewDialog.vue'
+import SubscribeDialog from './components/SubscribeDialogFixed.vue'
+import RenewDialog from './components/RenewDialogFixed.vue'
 
 const route = useRoute()
 const router = useRouter()

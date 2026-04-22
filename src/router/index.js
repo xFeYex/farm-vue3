@@ -31,13 +31,13 @@ const routes = [
       {
         path: 'resource-form',
         name: 'ResourceFormCreate',
-        component: () => import('@/views/lease/resource-form.vue'),
+        component: () => import('@/views/lease/resource-form-fixed.vue'),
         meta: { title: '发布资源' }
       },
       {
         path: 'resource-form/:id',
         name: 'ResourceFormEdit',
-        component: () => import('@/views/lease/resource-form.vue'),
+        component: () => import('@/views/lease/resource-form-fixed.vue'),
         meta: { title: '编辑资源' }
       },
       {
@@ -49,10 +49,16 @@ const routes = [
     ]
   },
   {
-    path: '/production',
+    path: '/production/:resourceId?',
     name: 'Production',
     component: () => import('@/views/production/index.vue'),
     meta: { title: '农场生产' }
+  },
+  {
+    path: '/sharing',
+    name: 'Sharing',
+    component: () => import('@/views/sharing'),
+    meta: { title: '\u519c\u4ea7\u54c1\u5171\u4eab' }
   }
 ]
 

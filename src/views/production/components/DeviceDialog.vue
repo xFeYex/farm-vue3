@@ -223,8 +223,8 @@ function validateForm() {
     nextErrors.durationMinutes = '每次时长请输入 1 到 180 之间的整数分钟'
   }
 
-  if (!Number.isInteger(targetHumidity) || targetHumidity < 30 || targetHumidity > 95) {
-    nextErrors.targetHumidity = '目标湿度请输入 30 到 95 之间的整数'
+  if (!Number.isInteger(targetHumidity) || targetHumidity < 0 || targetHumidity > 100) {
+    nextErrors.targetHumidity = '目标湿度请输入 0 到 100 之间的整数'
   }
 
   if (!startTimes.length) {
@@ -262,7 +262,23 @@ function handleSubmit() {
 }
 
 function normalizeTime(value) {
-  return /^\d{2}:\d{2}$/.test(value) ? value : ''
+  if (!/^\d{2}:\d{2}$/.test(value)) {
+    return ''
+  }
+
+  const [hourText, minuteText] = value.split(':')
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) {
+    return ''
+  }
+
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return ''
+  }
+
+  return `${hourText}:${minuteText}`
 }
 </script>
 
@@ -342,8 +358,8 @@ function normalizeTime(value) {
                 id="target-humidity"
                 class="field-control"
                 type="number"
-                min="30"
-                max="95"
+                min="0"
+                max="100"
                 step="1"
                 :value="form.targetHumidity"
                 :aria-invalid="Boolean(errors.targetHumidity)"
@@ -430,7 +446,7 @@ function normalizeTime(value) {
               <ul class="device-aside__list">
                 <li>每日次数和启动时间建议一一对应，方便排查执行节奏。</li>
                 <li>湿度目标不宜过高，避免长时间潮湿造成病害风险。</li>
-                <li>如果后续接真实接口，这个 payload 可直接映射到 `updateDevice`。</li>
+                <li>如果后续接真实接口，这个 payload 可直接映射到 `updateOrchestration`。</li>
               </ul>
             </div>
           </aside>

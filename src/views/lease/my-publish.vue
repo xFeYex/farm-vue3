@@ -77,8 +77,7 @@ const queryForm = reactive({
 const fetchData = async () => {
   loading.value = true
   try {
-    const res = await getMyResources(queryForm)
-    const data = res.data || res
+    const data = await getMyResources(queryForm)
     list.value = data.list || []
     total.value = data.total || 0
   } catch (error) {
@@ -120,7 +119,8 @@ const goToDetail = (id) => {
 }
 
 const handleEdit = (id) => {
-  router.push(`/lease/resource-form/${id}`)
+  return router.push(`/lease/resource-form/${id}`)
+  ElMessage.warning('当前后端暂未提供资源编辑接口，请先查看详情或等待接口补全')
 }
 
 // 下架操作

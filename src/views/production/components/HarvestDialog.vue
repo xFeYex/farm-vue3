@@ -22,7 +22,13 @@ const dialogTitleId = 'harvest-dialog-title'
 const nameInputRef = ref(null)
 const errors = ref({})
 const form = ref(createDefaultForm())
-const categoryOptions = ['果蔬', '叶菜', '香草', '根茎', '其他']
+const categoryOptions = [
+  { label: '果蔬', value: 'VEGETABLE' },
+  { label: '叶菜', value: 'LEAFY' },
+  { label: '香草', value: 'HERB' },
+  { label: '根茎', value: 'ROOT' },
+  { label: '其他', value: 'OTHER' },
+]
 const unitOptions = ['斤', '千克', '筐', '箱', '袋']
 
 let previousBodyOverflow = ''
@@ -38,6 +44,10 @@ const previewSummary = computed(() => {
 
   return `${form.value.productName || '未填写产品'} · ${formattedQuantity}${form.value.unit || ''}`
 })
+
+const categoryLabel = computed(
+  () => categoryOptions.find((item) => item.value === form.value.category)?.label || form.value.category,
+)
 
 watch(
   () => props.modelValue,
@@ -76,7 +86,7 @@ onBeforeUnmount(() => {
 function createDefaultForm() {
   return {
     productName: '',
-    category: '果蔬',
+    category: 'VEGETABLE',
     harvestQuantity: '',
     unit: '斤',
     harvestDate: todayString(),
@@ -289,8 +299,8 @@ function todayString() {
                   :aria-invalid="Boolean(errors.category)"
                   @change="updateField('category', $event.target.value)"
                 >
-                  <option v-for="item in categoryOptions" :key="item" :value="item">
-                    {{ item }}
+                  <option v-for="item in categoryOptions" :key="item.value" :value="item.value">
+                    {{ item.label }}
                   </option>
                 </select>
                 <p v-if="errors.category" class="field-error">{{ errors.category }}</p>
@@ -368,7 +378,7 @@ function todayString() {
             <div class="harvest-aside__card">
               <p class="harvest-aside__label">当前预览</p>
               <strong>{{ previewSummary }}</strong>
-              <p>{{ form.harvestDate || '未选择日期' }} · {{ form.category || '未选择分类' }}</p>
+              <p>{{ form.harvestDate || '未选择日期' }} · {{ categoryLabel || '未选择分类' }}</p>
               <p>{{ form.remark || '这里会同步显示本次收获记录的备注摘要。' }}</p>
             </div>
 

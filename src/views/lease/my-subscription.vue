@@ -11,7 +11,7 @@
           <div class="item-main">
             <div class="item-header">
               <!-- 这里假设后端在列表中返回了关联的资源名称，如果是纯外键，需要后端做 VO 拼装 -->
-              <span class="title">{{ item.resourceName || `资源ID: ${item.resourceId}` }}</span>
+              <span class="title">{{ item.resourceTitle || item.resourceName || `资源ID: ${item.resourceId}` }}</span>
               <el-tag :type="getStatusType(item.status)" size="small">
                 {{ getStatusLabel(item.status) }}
               </el-tag>
@@ -65,7 +65,7 @@ import { useRouter } from 'vue-router'
 import { Calendar } from '@element-plus/icons-vue'
 import { getMySubscriptions, cancelSubscription } from '@/api/lease'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import RenewDialog from './components/RenewDialog.vue'
+import RenewDialog from './components/RenewDialogFixed.vue'
 
 const router = useRouter()
 

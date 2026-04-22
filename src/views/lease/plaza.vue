@@ -17,7 +17,6 @@
         <el-form-item label="资源状态">
           <el-select v-model="queryForm.status" placeholder="全部状态" clearable style="width: 150px">
             <el-option label="上架中" value="ON_SHELF" />
-            <el-option label="已下架" value="OFF_SHELF" />
           </el-select>
         </el-form-item>
         <el-form-item>

@@ -1,16 +1,30 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import {
+  createHarvest,
+  createPlan,
+  getDashboard,
+  getEnvironment,
+  getHarvestList,
+  getPlanList,
+  updateOrchestration,
+} from '@/api/production'
 import DeviceDialog from './components/DeviceDialog.vue'
 import EmptyState from './components/EmptyState.vue'
 import HarvestDialog from './components/HarvestDialog.vue'
 import PlanDialog from './components/PlanDialog.vue'
 
+const route = useRoute()
+const router = useRouter()
+
 const loading = ref(true)
 const refreshLoading = ref(false)
 const notice = ref('')
-const resourceId = ref(resolveResourceId())
-const dashboard = ref(createMockDashboard(resourceId.value))
+const dashboard = ref(createInitialDashboard('101'))
 const lastUpdatedAt = ref('')
+const resourceInput = ref('101')
 const planDialogVisible = ref(false)
 const planSubmitting = ref(false)
 const planDialogMode = ref('create')
@@ -21,8 +35,16 @@ const currentDeviceConfig = ref(null)
 const harvestDialogVisible = ref(false)
 const harvestSubmitting = ref(false)
 const currentHarvest = ref(null)
+const DEFAULT_PAGE = 1
+const DEFAULT_PAGE_SIZE = 10
 
 let noticeTimer = null
+
+const resourceId = computed(() => {
+  const routeId = route.params.resourceId ?? route.query.resourceId
+
+  return String(routeId || '101')
+})
 
 const summaryStats = computed(() => {
   const plans = dashboard.value.plans ?? []
@@ -33,6 +55,10 @@ const summaryStats = computed(() => {
     0,
   )
   const runningPlans = plans.filter((item) => item.status === '进行中').length
+  const humidityValue =
+    deviceConfig.targetHumidity === null || deviceConfig.targetHumidity === undefined
+      ? '--'
+      : `${deviceConfig.targetHumidity}%`
 
   return [
     {
@@ -47,12 +73,12 @@ const summaryStats = computed(() => {
     },
     {
       label: '湿度目标',
-      value: `${deviceConfig.targetHumidity ?? '--'}%`,
+      value: humidityValue,
       detail: deviceConfig.sprinklerEnabled ? '喷水器已启用' : '喷水器未启用',
     },
     {
       label: '累计收获',
-      value: `${totalHarvest} 斤`,
+      value: `${formatValue(totalHarvest, 1)} 斤`,
       detail: `${harvests.length} 条记录`,
     },
   ]
@@ -82,20 +108,294 @@ const environmentMetrics = computed(() => {
       value: `${formatValue(environment.soilHumidity)}%`,
       note: '根区含水率',
     },
+    {
+      label: '空气质量',
+      value: `${formatValue(environment.airQuality)} 分`,
+      note: '环境综合评分',
+    },
   ]
 })
 
+const environmentSummaryText = computed(() => {
+  const environment = dashboard.value.environment ?? {}
+
+  if (environment.message) {
+    return environment.message
+  }
+
+  if (environment.snapshotTime) {
+    return `最近快照 ${formatDateTime(environment.snapshotTime)}`
+  }
+
+  return '当前还没有环境快照数据'
+})
+
 const latestHarvest = computed(() => {
-  const [firstHarvest] = dashboard.value.harvests ?? []
+  const [firstHarvest] = sortHarvests(dashboard.value.harvests ?? [])
 
   return firstHarvest
-    ? `${firstHarvest.productName} ${firstHarvest.harvestQuantity}${firstHarvest.unit}`
+    ? `${firstHarvest.productName} ${formatValue(firstHarvest.harvestQuantity, 1)}${firstHarvest.unit}`
     : '暂无收获记录'
 })
 
-onMounted(() => {
-  loadDashboard()
-})
+watch(
+  resourceId,
+  async (nextResourceId) => {
+    resourceInput.value = String(nextResourceId)
+    dashboard.value = createInitialDashboard(nextResourceId)
+    await loadDashboard()
+  },
+  { immediate: true },
+)
+
+function createInitialDashboardState(id) {
+  return {
+    available: true,
+    resourceId: String(id),
+    message: '',
+    resourceName: `资源 ${id}`,
+    greenhouseName: `智慧生产资源 ${id}`,
+    plans: [],
+    harvests: [],
+    planTotal: 0,
+    harvestTotal: 0,
+    deviceConfig: normalizeDeviceConfig(createDefaultDeviceConfig()),
+    environment: createEmptyEnvironment(),
+    camera: null,
+  }
+}
+
+function toStartTimesArray(value) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean)
+  }
+
+  if (typeof value !== 'string' || !value.trim()) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+
+function normalizeOrchestrationResult(orchestration) {
+  if (!orchestration) {
+    return normalizeDeviceConfig(createDefaultDeviceConfig())
+  }
+
+  const nextTargetHumidity =
+    orchestration.targetHumidity === null || orchestration.targetHumidity === undefined
+      ? null
+      : Number(orchestration.targetHumidity)
+
+  return normalizeDeviceConfig({
+    ...createDefaultDeviceConfig(),
+    name: orchestration.name || '基础灌溉编排',
+    timesPerDay: Number(orchestration.timesPerDay ?? 0),
+    durationMinutes: Number(orchestration.durationMinutes ?? 0),
+    startTimes: toStartTimesArray(orchestration.startTimes ?? orchestration.startTimesJson),
+    sprinklerEnabled: orchestration.sprinklerEnabled ?? false,
+    targetHumidity: Number.isFinite(nextTargetHumidity) ? nextTargetHumidity : null,
+    status: orchestration.status || 'INACTIVE',
+    updatedAt: orchestration.updatedAt || '',
+  })
+}
+
+async function loadPlanRecords() {
+  const data = await getPlanList(resourceId.value, {
+    userId: getCurrentUserId(),
+    page: DEFAULT_PAGE,
+    pageSize: DEFAULT_PAGE_SIZE,
+  })
+
+  dashboard.value = {
+    ...dashboard.value,
+    plans: Array.isArray(data?.list) ? data.list : [],
+    planTotal: Number(data?.total ?? 0),
+  }
+
+  return data
+}
+
+async function loadHarvestRecords() {
+  const data = await getHarvestList(resourceId.value, {
+    userId: getCurrentUserId(),
+    page: DEFAULT_PAGE,
+    pageSize: DEFAULT_PAGE_SIZE,
+  })
+
+  dashboard.value = {
+    ...dashboard.value,
+    harvests: sortHarvests(Array.isArray(data?.list) ? data.list : []),
+    harvestTotal: Number(data?.total ?? 0),
+  }
+
+  return data
+}
+
+async function loadProductionPage() {
+  loading.value = true
+
+  try {
+    const data = await getDashboard(resourceId.value, getCurrentUserId())
+    const nextResourceId = String(data?.resourceId ?? resourceId.value)
+
+    if (data?.available === false) {
+      dashboard.value = {
+        ...createInitialDashboardState(nextResourceId),
+        available: false,
+        resourceId: nextResourceId,
+        message: data?.message || '',
+        greenhouseName: data?.orchestration?.name || `智慧生产资源 ${nextResourceId}`,
+        deviceConfig: normalizeOrchestrationResult(data?.orchestration),
+        camera: data?.camera ?? null,
+      }
+      lastUpdatedAt.value = resolveLastUpdatedTime(dashboard.value)
+      return
+    }
+
+    const [environmentData, planPage, harvestPage] = await Promise.all([
+      getEnvironment(nextResourceId, getCurrentUserId()),
+      getPlanList(nextResourceId, {
+        userId: getCurrentUserId(),
+        page: DEFAULT_PAGE,
+        pageSize: DEFAULT_PAGE_SIZE,
+      }),
+      getHarvestList(nextResourceId, {
+        userId: getCurrentUserId(),
+        page: DEFAULT_PAGE,
+        pageSize: DEFAULT_PAGE_SIZE,
+      }),
+    ])
+
+    dashboard.value = {
+      ...createInitialDashboardState(nextResourceId),
+      available: true,
+      resourceId: nextResourceId,
+      message: data?.message || '',
+      greenhouseName: data?.orchestration?.name || `智慧生产资源 ${nextResourceId}`,
+      plans: Array.isArray(planPage?.list) ? planPage.list : [],
+      planTotal: Number(planPage?.total ?? 0),
+      harvests: sortHarvests(Array.isArray(harvestPage?.list) ? harvestPage.list : []),
+      harvestTotal: Number(harvestPage?.total ?? 0),
+      deviceConfig: normalizeOrchestrationResult(data?.orchestration),
+      environment: mapEnvironmentToViewModel(environmentData),
+      camera: data?.camera ?? null,
+    }
+
+    lastUpdatedAt.value = resolveLastUpdatedTime(dashboard.value)
+  } catch (error) {
+    dashboard.value = {
+      ...createInitialDashboardState(resourceId.value),
+      available: false,
+      message: error.message || '智慧生产首页加载失败',
+    }
+    handleApiError(error, '智慧生产首页加载失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function refreshEnvironmentData() {
+  refreshLoading.value = true
+
+  try {
+    const data = await getEnvironment(resourceId.value, getCurrentUserId())
+
+    dashboard.value = {
+      ...dashboard.value,
+      environment: mapEnvironmentToViewModel(data),
+    }
+
+    lastUpdatedAt.value = resolveLastUpdatedTime(dashboard.value)
+    showNotice(data?.message || '环境数据已刷新')
+  } catch (error) {
+    handleApiError(error, '环境数据刷新失败')
+  } finally {
+    refreshLoading.value = false
+  }
+}
+
+async function savePlanRecord(payload) {
+  planSubmitting.value = true
+
+  try {
+    const result = await createPlan(resourceId.value, {
+      userId: getCurrentUserId(),
+      title: payload.title,
+      planContent: payload.planContent,
+      planDate: payload.planDate,
+    })
+
+    await loadPlanRecords()
+    planDialogVisible.value = false
+    currentPlan.value = null
+    lastUpdatedAt.value = formatDateTime(result.createdAt || new Date())
+    showNotice('种植计划已创建')
+  } catch (error) {
+    handleApiError(error, '新增种植计划失败')
+  } finally {
+    planSubmitting.value = false
+  }
+}
+
+async function saveDeviceRecord(payload) {
+  deviceSubmitting.value = true
+
+  try {
+    const result = await updateOrchestration(resourceId.value, {
+      userId: getCurrentUserId(),
+      ...payload,
+    })
+
+    dashboard.value = {
+      ...dashboard.value,
+      deviceConfig: normalizeOrchestrationResult({
+        ...dashboard.value.deviceConfig,
+        name: dashboard.value.deviceConfig?.name || '基础灌溉编排',
+        ...result,
+      }),
+    }
+
+    deviceDialogVisible.value = false
+    lastUpdatedAt.value = formatDateTime(result.updatedAt || new Date())
+    showNotice('设备参数已更新')
+  } catch (error) {
+    handleApiError(error, '设备参数更新失败')
+  } finally {
+    deviceSubmitting.value = false
+  }
+}
+
+async function saveHarvestRecord(payload) {
+  harvestSubmitting.value = true
+
+  try {
+    const result = await createHarvest(resourceId.value, {
+      userId: getCurrentUserId(),
+      productName: payload.productName,
+      category: payload.category,
+      harvestQuantity: payload.harvestQuantity,
+      unit: payload.unit,
+      harvestDate: payload.harvestDate,
+      remark: payload.remark,
+    })
+
+    await loadHarvestRecords()
+    harvestDialogVisible.value = false
+    currentHarvest.value = null
+    lastUpdatedAt.value = formatDateTime(result.createdAt || new Date())
+    showNotice('收获记录已新增')
+  } catch (error) {
+    handleApiError(error, '新增收获记录失败')
+  } finally {
+    harvestSubmitting.value = false
+  }
+}
 
 onBeforeUnmount(() => {
   if (noticeTimer) {
@@ -104,40 +404,88 @@ onBeforeUnmount(() => {
 })
 
 async function loadDashboard() {
+  return loadProductionPage()
   loading.value = true
 
-  await sleep(420)
+  try {
+    const data = await getDashboard(resourceId.value, getCurrentUserId())
+    const cachedPlans = getStoredResourceList(resourceId.value, 'plans')
+    const cachedHarvests = sortHarvests(getStoredResourceList(resourceId.value, 'harvests'))
+    const cachedDeviceConfig = getStoredDeviceConfig(resourceId.value)
 
-  dashboard.value = createMockDashboard(resourceId.value)
-  lastUpdatedAt.value = formatDateTime(new Date())
-  loading.value = false
+    dashboard.value = {
+      available: Boolean(data?.available),
+      resourceId: String(data?.resourceId ?? resourceId.value),
+      message: data?.message || '',
+      resourceName: `资源 ${data?.resourceId ?? resourceId.value}`,
+      greenhouseName: data?.orchestration?.name || `智慧生产资源 ${data?.resourceId ?? resourceId.value}`,
+      plans: cachedPlans,
+      harvests: cachedHarvests,
+      deviceConfig: normalizeDeviceConfig({
+        ...mapOrchestrationToDeviceConfig(data?.orchestration),
+        ...cachedDeviceConfig,
+      }),
+      environment: mapEnvironmentToViewModel(data?.environment),
+      camera: data?.camera ?? null,
+    }
+
+    lastUpdatedAt.value = resolveLastUpdatedTime(dashboard.value)
+  } catch (error) {
+    dashboard.value = {
+      ...createInitialDashboard(resourceId.value),
+      available: false,
+      message: error.message || '智慧生产主页加载失败',
+    }
+    handleApiError(error, '智慧生产主页加载失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 async function refreshEnvironment() {
+  return refreshEnvironmentData()
   refreshLoading.value = true
 
-  await sleep(360)
+  try {
+    const data = await getEnvironment(resourceId.value, getCurrentUserId())
 
-  const environment = dashboard.value.environment ?? {}
+    dashboard.value = {
+      ...dashboard.value,
+      environment: mapEnvironmentToViewModel(data),
+    }
 
-  dashboard.value = {
-    ...dashboard.value,
-    environment: {
-      ...environment,
-      temperature: nudgeNumber(environment.temperature, 0.8, 1),
-      humidity: nudgeNumber(environment.humidity, 3, 0),
-      light: nudgeNumber(environment.light, 45, 0),
-      soilHumidity: clamp(nudgeNumber(environment.soilHumidity, 4, 0), 30, 90),
-    },
+    lastUpdatedAt.value = resolveLastUpdatedTime(dashboard.value)
+    showNotice(data?.message || '环境数据已刷新。')
+  } catch (error) {
+    handleApiError(error, '环境数据刷新失败')
+  } finally {
+    refreshLoading.value = false
+  }
+}
+
+async function applyResourceId() {
+  const nextResourceId = String(resourceInput.value || '').trim()
+
+  if (!nextResourceId) {
+    handleApiError(new Error('请输入资源编号'), '请输入资源编号')
+    return
   }
 
-  refreshLoading.value = false
-  lastUpdatedAt.value = formatDateTime(new Date())
-  showNotice('环境数据已刷新，当前为演示数据。')
+  if (nextResourceId === resourceId.value) {
+    await loadDashboard()
+    return
+  }
+
+  router.push({
+    name: 'Production',
+    params: {
+      resourceId: nextResourceId,
+    },
+  })
 }
 
 function handlePlaceholderAction(label) {
-  showNotice(`${label}弹窗会在下一步继续接入，首页入口已经预留。`)
+  showNotice(`${label}入口已保留，后续可以继续扩展。`)
 }
 
 function openCreatePlanDialog() {
@@ -146,10 +494,9 @@ function openCreatePlanDialog() {
   planDialogVisible.value = true
 }
 
-function openEditPlanDialog(plan) {
-  planDialogMode.value = 'edit'
-  currentPlan.value = { ...plan }
-  planDialogVisible.value = true
+function openEditPlanDialog() {
+  ElMessage.info('当前后端暂未开放计划编辑接口，仅支持新增计划。')
+  showNotice('当前后端暂未开放计划编辑接口，仅支持新增计划。')
 }
 
 function closePlanDialog() {
@@ -161,40 +508,48 @@ function closePlanDialog() {
 }
 
 async function handlePlanSave(payload) {
+  return savePlanRecord(payload)
   planSubmitting.value = true
 
-  await sleep(420)
+  try {
+    const result = await createPlan(resourceId.value, {
+      userId: getCurrentUserId(),
+      title: payload.title,
+      planContent: payload.planContent,
+      planDate: payload.planDate,
+    })
 
-  const plans = [...(dashboard.value.plans ?? [])]
+    const nextPlan = {
+      id: result.planId ?? Date.now(),
+      title: result.title,
+      planContent: result.planContent,
+      planDate: result.planDate,
+      status: payload.status || mapPlanStatus(result.status),
+      backendStatus: result.status,
+      createdAt: result.createdAt,
+    }
 
-  if (planDialogMode.value === 'edit' && payload.id) {
+    const nextPlans = [nextPlan, ...(dashboard.value.plans ?? [])]
+
     dashboard.value = {
       ...dashboard.value,
-      plans: plans.map((item) => (item.id === payload.id ? { ...item, ...payload } : item)),
+      plans: nextPlans,
     }
-    showNotice('计划已更新，首页列表已同步。')
-  } else {
-    dashboard.value = {
-      ...dashboard.value,
-      plans: [
-        {
-          ...payload,
-          id: Date.now(),
-        },
-        ...plans,
-      ],
-    }
-    showNotice('计划已创建，后续可以继续接入真实提交接口。')
+
+    setStoredResourceList(resourceId.value, 'plans', nextPlans)
+    planDialogVisible.value = false
+    lastUpdatedAt.value = formatDateTime(result.createdAt || new Date())
+    showNotice('种植计划已提交，当前列表使用本地缓存补齐展示。')
+  } catch (error) {
+    handleApiError(error, '新增种植计划失败')
+  } finally {
+    planSubmitting.value = false
   }
-
-  planSubmitting.value = false
-  planDialogVisible.value = false
-  lastUpdatedAt.value = formatDateTime(new Date())
 }
 
 function openDeviceDialog() {
   currentDeviceConfig.value = {
-    ...(dashboard.value.deviceConfig ?? {}),
+    ...(dashboard.value.deviceConfig ?? createDefaultDeviceConfig()),
     startTimes: [...(dashboard.value.deviceConfig?.startTimes ?? [])],
   }
   deviceDialogVisible.value = true
@@ -209,24 +564,37 @@ function closeDeviceDialog() {
 }
 
 async function handleDeviceSave(payload) {
+  return saveDeviceRecord(payload)
   deviceSubmitting.value = true
 
-  await sleep(420)
-
-  dashboard.value = {
-    ...dashboard.value,
-    deviceConfig: {
-      ...dashboard.value.deviceConfig,
+  try {
+    const result = await updateOrchestration(resourceId.value, {
+      userId: getCurrentUserId(),
       ...payload,
-      linkageMode: payload.sprinklerEnabled ? '自动联动' : '手动待机',
-      lastOperator: '生产管理员',
-    },
-  }
+    })
 
-  deviceSubmitting.value = false
-  deviceDialogVisible.value = false
-  lastUpdatedAt.value = formatDateTime(new Date())
-  showNotice('设备参数已更新，联动卡片已同步最新配置。')
+    const nextDeviceConfig = normalizeDeviceConfig({
+      ...dashboard.value.deviceConfig,
+      name: dashboard.value.deviceConfig?.name || '基础灌溉编排',
+      ...result,
+      linkageMode: mapDeviceLinkageMode(result.status, result.sprinklerEnabled),
+      updatedAt: result.updatedAt,
+    })
+
+    dashboard.value = {
+      ...dashboard.value,
+      deviceConfig: nextDeviceConfig,
+    }
+
+    setStoredDeviceConfig(resourceId.value, nextDeviceConfig)
+    deviceDialogVisible.value = false
+    lastUpdatedAt.value = formatDateTime(result.updatedAt || new Date())
+    showNotice('设备参数已更新，联动卡片已同步最新配置。')
+  } catch (error) {
+    handleApiError(error, '设备参数更新失败')
+  } finally {
+    deviceSubmitting.value = false
+  }
 }
 
 function openHarvestDialog() {
@@ -243,27 +611,49 @@ function closeHarvestDialog() {
 }
 
 async function handleHarvestSave(payload) {
+  return saveHarvestRecord(payload)
   harvestSubmitting.value = true
 
-  await sleep(420)
+  try {
+    const result = await createHarvest(resourceId.value, {
+      userId: getCurrentUserId(),
+      productName: payload.productName,
+      category: payload.category,
+      harvestQuantity: payload.harvestQuantity,
+      unit: payload.unit,
+      harvestDate: payload.harvestDate,
+      remark: payload.remark,
+    })
 
-  const nextHarvests = sortHarvests([
-    {
-      ...payload,
-      id: Date.now(),
-    },
-    ...(dashboard.value.harvests ?? []),
-  ])
+    const nextHarvests = sortHarvests([
+      {
+        id: result.harvestId ?? Date.now(),
+        productName: result.productName,
+        category: result.category,
+        harvestQuantity: result.harvestQuantity,
+        unit: result.unit,
+        harvestDate: result.harvestDate,
+        remark: result.remark,
+        status: result.status,
+        createdAt: result.createdAt,
+      },
+      ...(dashboard.value.harvests ?? []),
+    ])
 
-  dashboard.value = {
-    ...dashboard.value,
-    harvests: nextHarvests,
+    dashboard.value = {
+      ...dashboard.value,
+      harvests: nextHarvests,
+    }
+
+    setStoredResourceList(resourceId.value, 'harvests', nextHarvests)
+    harvestDialogVisible.value = false
+    lastUpdatedAt.value = formatDateTime(result.createdAt || new Date())
+    showNotice('收获记录已新增，当前列表使用本地缓存补齐展示。')
+  } catch (error) {
+    handleApiError(error, '新增收获记录失败')
+  } finally {
+    harvestSubmitting.value = false
   }
-
-  harvestSubmitting.value = false
-  harvestDialogVisible.value = false
-  lastUpdatedAt.value = formatDateTime(new Date())
-  showNotice('收获记录已新增，首页列表已按日期刷新。')
 }
 
 function showNotice(message) {
@@ -275,105 +665,249 @@ function showNotice(message) {
 
   noticeTimer = setTimeout(() => {
     notice.value = ''
-  }, 2600)
+  }, 3200)
 }
 
-function resolveResourceId() {
-  if (typeof window === 'undefined') {
-    return '101'
-  }
+function handleApiError(error, fallbackMessage) {
+  const message = error?.message || fallbackMessage
 
-  const pathnameMatch = window.location.pathname.match(/production\/([^/?#]+)/)
-
-  if (pathnameMatch?.[1]) {
-    return decodeURIComponent(pathnameMatch[1])
-  }
-
-  const hashMatch = window.location.hash.match(/production\/([^/?#]+)/)
-
-  if (hashMatch?.[1]) {
-    return decodeURIComponent(hashMatch[1])
-  }
-
-  const params = new URLSearchParams(window.location.search)
-
-  return params.get('resourceId') || '101'
+  ElMessage.error(message)
+  showNotice(message)
 }
 
-function createMockDashboard(id) {
+function createInitialDashboard(id) {
+  return createInitialDashboardState(id)
   return {
-    enabled: true,
-    resourceName: `东区一号温室 · 资源 ${id}`,
-    greenhouseName: '春季高值果蔬区',
-    plans: [
-      {
-        id: 1,
-        title: '4月番茄定植计划',
-        planDate: '2026-04-20',
-        planContent: '完成幼苗定植、补充基质水分，并复核滴灌通畅情况。',
-        status: '进行中',
-      },
-      {
-        id: 2,
-        title: '草莓育苗补光排程',
-        planDate: '2026-04-22',
-        planContent: '晚间补光 2 小时，关注新叶卷曲和湿度变化。',
-        status: '待执行',
-      },
-      {
-        id: 3,
-        title: '病虫巡检复盘',
-        planDate: '2026-04-17',
-        planContent: '记录叶片斑点、补拍样本照片，并同步本周处理建议。',
-        status: '已完成',
-      },
-    ],
-    deviceConfig: {
-      timesPerDay: 3,
-      durationMinutes: 10,
-      startTimes: ['08:00', '14:00', '19:30'],
-      targetHumidity: 70,
-      sprinklerEnabled: true,
-      linkageMode: '自动联动',
-      lastOperator: '生产管理员',
-    },
-    environment: {
-      temperature: 26.4,
-      humidity: 65,
-      light: 326,
-      soilHumidity: 52,
-      stability: '参数稳定，适合继续维持当前灌溉节奏。',
-    },
-    harvests: [
-      {
-        id: 1,
-        productName: '樱桃番茄',
-        category: '果蔬',
-        harvestQuantity: 80,
-        unit: '斤',
-        harvestDate: '2026-04-16',
-        remark: '第一批果实成熟度高，适合分级装箱。',
-      },
-      {
-        id: 2,
-        productName: '水果黄瓜',
-        category: '果蔬',
-        harvestQuantity: 40,
-        unit: '斤',
-        harvestDate: '2026-04-14',
-        remark: '表皮完整度好，适合供应到店。',
-      },
-      {
-        id: 3,
-        productName: '奶油生菜',
-        category: '叶菜',
-        harvestQuantity: 28,
-        unit: '斤',
-        harvestDate: '2026-04-12',
-        remark: '建议下一批缩短采后预冷时间。',
-      },
-    ],
+    available: true,
+    resourceId: String(id),
+    message: '',
+    resourceName: `资源 ${id}`,
+    greenhouseName: `智慧生产资源 ${id}`,
+    plans: getStoredResourceList(id, 'plans'),
+    harvests: sortHarvests(getStoredResourceList(id, 'harvests')),
+    deviceConfig: normalizeDeviceConfig({
+      ...createDefaultDeviceConfig(),
+      ...getStoredDeviceConfig(id),
+    }),
+    environment: createEmptyEnvironment(),
+    camera: null,
   }
+}
+
+function createDefaultDeviceConfig() {
+  return {
+    name: '基础灌溉编排',
+    timesPerDay: 0,
+    durationMinutes: 0,
+    startTimes: [],
+    targetHumidity: null,
+    sprinklerEnabled: false,
+    linkageMode: '未配置',
+    status: 'INACTIVE',
+    updatedAt: '',
+    lastOperator: '系统同步',
+  }
+}
+
+function createEmptyEnvironment(message = '') {
+  return {
+    temperature: null,
+    humidity: null,
+    light: null,
+    soilHumidity: null,
+    airQuality: null,
+    snapshotTime: null,
+    message,
+  }
+}
+
+function mapOrchestrationToDeviceConfig(orchestration) {
+  if (!orchestration) {
+    return createDefaultDeviceConfig()
+  }
+
+  return {
+    name: orchestration.name || '基础灌溉编排',
+    timesPerDay: Number(orchestration.timesPerDay ?? 0),
+    durationMinutes: Number(orchestration.durationMinutes ?? 0),
+    startTimes: parseStartTimes(orchestration.startTimesJson),
+    linkageMode: mapDeviceLinkageMode(orchestration.status, null),
+    status: orchestration.status || 'INACTIVE',
+  }
+}
+
+function normalizeDeviceConfig(deviceConfig) {
+  const nextConfig = {
+    ...createDefaultDeviceConfig(),
+    ...deviceConfig,
+  }
+
+  return {
+    ...nextConfig,
+    startTimes: Array.isArray(nextConfig.startTimes) ? [...nextConfig.startTimes] : [],
+    linkageMode: mapDeviceLinkageMode(nextConfig.status, nextConfig.sprinklerEnabled),
+  }
+}
+
+function mapEnvironmentToViewModel(environment) {
+  if (!environment) {
+    return createEmptyEnvironment('当前还没有环境快照数据')
+  }
+
+  const snapshotMissing = [
+    environment.temperature,
+    environment.humidity,
+    environment.lightLux,
+    environment.soilMoisture,
+    environment.airQuality,
+    environment.snapshotTime,
+  ].every((item) => item === null || item === undefined)
+
+  return {
+    temperature: environment.temperature ?? null,
+    humidity: environment.humidity ?? null,
+    light: environment.lightLux ?? null,
+    soilHumidity: environment.soilMoisture ?? null,
+    airQuality: environment.airQuality ?? null,
+    snapshotTime: environment.snapshotTime ?? null,
+    message:
+      environment.message ||
+      (snapshotMissing ? '当前还没有环境快照数据' : ''),
+  }
+}
+
+function mapDeviceLinkageMode(status, sprinklerEnabled) {
+  if (sprinklerEnabled === false) {
+    return '手动待机'
+  }
+
+  if (status === 'ACTIVE') {
+    return '自动联动'
+  }
+
+  if (status) {
+    return '待机配置'
+  }
+
+  return '未配置'
+}
+
+function mapPlanStatus(status) {
+  if (status === 'ACTIVE') {
+    return '进行中'
+  }
+
+  return '待执行'
+}
+
+function formatHarvestCategory(category) {
+  const categoryMap = {
+    VEGETABLE: '果蔬',
+    LEAFY: '叶菜',
+    HERB: '香草',
+    ROOT: '根茎',
+    OTHER: '其他',
+  }
+
+  return categoryMap[category] || category || '--'
+}
+
+function getCurrentUserId() {
+  if (typeof window === 'undefined') {
+    return 2001
+  }
+
+  const savedId = window.localStorage.getItem('farming_user_id')
+
+  if (!savedId) {
+    window.localStorage.setItem('farming_user_id', '2001')
+    return 2001
+  }
+
+  const nextUserId = Number(savedId)
+
+  if (Number.isFinite(nextUserId)) {
+    return nextUserId
+  }
+
+  window.localStorage.setItem('farming_user_id', '2001')
+  return 2001
+}
+
+function parseStartTimes(startTimesJson) {
+  if (!startTimesJson) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(startTimesJson)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+// 计划和收获列表接口当前还没开放，这里用 localStorage 暂存创建成功的数据，避免页面刷新后完全丢失。
+function getStoredResourceList(id, type) {
+  if (typeof window === 'undefined') {
+    return []
+  }
+
+  try {
+    const raw = window.localStorage.getItem(`production:${id}:${type}`)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function setStoredResourceList(id, type, list) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(`production:${id}:${type}`, JSON.stringify(list))
+}
+
+function getStoredDeviceConfig(id) {
+  if (typeof window === 'undefined') {
+    return {}
+  }
+
+  try {
+    const raw = window.localStorage.getItem(`production:${id}:device-config`)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function setStoredDeviceConfig(id, config) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(
+    `production:${id}:device-config`,
+    JSON.stringify({
+      timesPerDay: config.timesPerDay,
+      durationMinutes: config.durationMinutes,
+      startTimes: config.startTimes,
+      targetHumidity: config.targetHumidity,
+      sprinklerEnabled: config.sprinklerEnabled,
+      status: config.status,
+      updatedAt: config.updatedAt,
+    }),
+  )
+}
+
+function resolveLastUpdatedTime(currentDashboard) {
+  return (
+    formatDateTime(currentDashboard.environment?.snapshotTime) ||
+    formatDateTime(currentDashboard.deviceConfig?.updatedAt) ||
+    formatDateTime(new Date())
+  )
 }
 
 function formatDate(value) {
@@ -390,7 +924,17 @@ function formatDate(value) {
   return `${pad(date.getMonth() + 1)}.${pad(date.getDate())}`
 }
 
-function formatDateTime(date) {
+function formatDateTime(value) {
+  if (!value) {
+    return ''
+  }
+
+  const date = value instanceof Date ? value : new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
   return `${pad(date.getMonth() + 1)}.${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
@@ -413,32 +957,15 @@ function planTone(status) {
     return 'success'
   }
 
-  if (status === '进行中') {
+  if (status === '进行中' || status === 'ACTIVE') {
     return 'warning'
   }
 
   return 'neutral'
 }
 
-function nudgeNumber(value, range, digits) {
-  const current = Number(value ?? 0)
-  const nextValue = current + (Math.random() * 2 - 1) * range
-
-  return Number(nextValue.toFixed(digits))
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value))
-}
-
 function pad(value) {
   return String(value).padStart(2, '0')
-}
-
-function sleep(duration) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, duration)
-  })
 }
 
 function sortHarvests(list) {
@@ -450,7 +977,7 @@ function sortHarvests(list) {
       return rightTime - leftTime
     }
 
-    return Number(right.id ?? 0) - Number(left.id ?? 0)
+    return Number(right.harvestId ?? right.id ?? 0) - Number(left.harvestId ?? left.id ?? 0)
   })
 }
 </script>
@@ -470,7 +997,29 @@ function sortHarvests(list) {
           </p>
 
           <div class="hero__chips">
-            <span class="hero-chip">资源编号 {{ resourceId }}</span>
+            <div class="resource-search">
+              <label class="resource-search__label" for="resource-id-input">资源编号</label>
+              <div class="resource-search__controls">
+                <input
+                  id="resource-id-input"
+                  v-model.trim="resourceInput"
+                  class="resource-search__input"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="请输入资源编号"
+                  @keydown.enter.prevent="applyResourceId"
+                />
+                <button
+                  class="resource-search__button"
+                  type="button"
+                  :disabled="loading"
+                  @click="applyResourceId"
+                >
+                  {{ loading ? '加载中' : '切换' }}
+                </button>
+              </div>
+            </div>
+            <span class="hero-chip">当前资源 {{ resourceId }}</span>
             <span class="hero-chip hero-chip--soft">{{ dashboard.resourceName }}</span>
             <span class="hero-chip hero-chip--soft">最后更新 {{ lastUpdatedAt || '--' }}</span>
           </div>
@@ -490,9 +1039,9 @@ function sortHarvests(list) {
             <button
               class="action-button action-button--ghost"
               type="button"
-              @click="handlePlaceholderAction('总体配置')"
+              @click="refreshEnvironment"
             >
-              查看说明
+              刷新环境
             </button>
           </div>
         </div>
@@ -512,7 +1061,11 @@ function sortHarvests(list) {
         </article>
       </section>
 
-      <EmptyState v-else-if="dashboard.enabled === false" @retry="loadDashboard" />
+      <EmptyState
+        v-else-if="dashboard.available === false"
+        :description="dashboard.message || '当前订阅已失效，智慧生产模块不可用。'"
+        @retry="loadDashboard"
+      />
 
       <template v-else>
         <section class="summary-grid">
@@ -540,7 +1093,10 @@ function sortHarvests(list) {
             </header>
 
             <ul class="plan-list">
-              <li v-for="item in dashboard.plans" :key="item.id" class="plan-item">
+              <li v-if="!dashboard.plans.length" class="empty-list-item">
+                暂无种植计划
+              </li>
+              <li v-for="item in dashboard.plans" :key="item.planId" class="plan-item">
                 <div class="plan-item__head">
                   <strong>{{ item.title }}</strong>
                   <div class="plan-item__actions">
@@ -591,7 +1147,14 @@ function sortHarvests(list) {
                 </div>
                 <div class="device-stat">
                   <span>目标湿度</span>
-                  <strong>{{ dashboard.deviceConfig.targetHumidity }}%</strong>
+                  <strong>
+                    {{
+                      dashboard.deviceConfig.targetHumidity === null ||
+                      dashboard.deviceConfig.targetHumidity === undefined
+                        ? '--'
+                        : `${dashboard.deviceConfig.targetHumidity}%`
+                    }}
+                  </strong>
                 </div>
                 <div class="device-stat">
                   <span>联动模式</span>
@@ -603,6 +1166,12 @@ function sortHarvests(list) {
                 <div>
                   <p class="module-note">启动时间</p>
                   <div class="time-chips">
+                    <span
+                      v-if="!dashboard.deviceConfig.startTimes.length"
+                      class="time-chip time-chip--empty"
+                    >
+                      暂无启动时间
+                    </span>
                     <span
                       v-for="time in dashboard.deviceConfig.startTimes"
                       :key="time"
@@ -652,7 +1221,7 @@ function sortHarvests(list) {
             </div>
 
             <p class="module-note module-note--highlight">
-              {{ dashboard.environment.stability }}
+              {{ environmentSummaryText }}
             </p>
           </article>
 
@@ -677,13 +1246,16 @@ function sortHarvests(list) {
             </div>
 
             <ul class="harvest-list">
-              <li v-for="item in dashboard.harvests" :key="item.id" class="harvest-item">
+              <li v-if="!dashboard.harvests.length" class="empty-list-item">
+                暂无收获记录
+              </li>
+              <li v-for="item in dashboard.harvests" :key="item.harvestId" class="harvest-item">
                 <div>
                   <strong>{{ item.productName }}</strong>
-                  <p>{{ item.category }} · {{ item.remark }}</p>
+                  <p>{{ formatHarvestCategory(item.category) }} · {{ item.remark || '暂无备注' }}</p>
                 </div>
                 <div class="harvest-item__meta">
-                  <strong>{{ item.harvestQuantity }}{{ item.unit }}</strong>
+                  <strong>{{ formatValue(item.harvestQuantity, 1) }}{{ item.unit }}</strong>
                   <span>{{ formatDate(item.harvestDate) }}</span>
                 </div>
               </li>
@@ -816,6 +1388,79 @@ function sortHarvests(list) {
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 24px;
+}
+
+.resource-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 8px 10px 8px 14px;
+  border-radius: 20px;
+  background: rgba(41, 66, 48, 0.08);
+  border: 1px solid rgba(41, 66, 48, 0.08);
+}
+
+.resource-search__label {
+  font-size: 14px;
+  font-weight: 700;
+  color: #294230;
+  white-space: nowrap;
+}
+
+.resource-search__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resource-search__input {
+  width: 120px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid rgba(57, 79, 63, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #213226;
+  font-size: 14px;
+  font-weight: 700;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background-color 180ms ease;
+}
+
+.resource-search__input:focus {
+  outline: none;
+  border-color: rgba(87, 125, 74, 0.48);
+  box-shadow: 0 0 0 4px rgba(135, 168, 115, 0.14);
+  background: white;
+}
+
+.resource-search__button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: #294230;
+  color: #f3f7ee;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.resource-search__button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px rgba(41, 66, 48, 0.18);
+}
+
+.resource-search__button:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 .hero-chip {
@@ -989,6 +1634,16 @@ function sortHarvests(list) {
   list-style: none;
 }
 
+.empty-list-item {
+  padding: 18px;
+  border: 1px dashed rgba(103, 134, 88, 0.18);
+  border-radius: 22px;
+  background: rgba(248, 251, 245, 0.88);
+  font-size: 14px;
+  line-height: 1.75;
+  color: #6b7d6d;
+}
+
 .plan-item,
 .harvest-item,
 .metric-card,
@@ -1070,6 +1725,7 @@ function sortHarvests(list) {
 }
 
 .mini-action {
+  display: none;
   min-height: 30px;
   padding: 0 10px;
   border: 1px solid rgba(57, 79, 63, 0.12);
@@ -1170,6 +1826,11 @@ function sortHarvests(list) {
   font-size: 13px;
   font-weight: 700;
   border: 1px solid rgba(109, 136, 96, 0.12);
+}
+
+.time-chip--empty {
+  color: #708172;
+  font-weight: 600;
 }
 
 .device-flag {
@@ -1307,6 +1968,21 @@ function sortHarvests(list) {
   .module-card,
   .summary-card {
     padding: 22px;
+  }
+
+  .resource-search,
+  .resource-search__controls {
+    width: 100%;
+  }
+
+  .resource-search {
+    flex-direction: column;
+    align-items: stretch;
+    border-radius: 18px;
+  }
+
+  .resource-search__input {
+    width: 100%;
   }
 
   .module-card__header,
